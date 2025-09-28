@@ -1,0 +1,342 @@
+---
+title: "DATA 607 Assignment 5B"
+author: "Wendy Romero"
+date: ""
+output: 
+  html_document:
+      theme: default
+      highlight: tango
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+```
+
+# Introduction: Chess Tournament ELO Calculations
+
+Using the same chess tournament data from Project 1, we will use the difference between each chess player and their opponents pre-ratings to calculate each chess player's expected score. We will then find the difference between their expected score and their actual score in the tournament. Finally, we will list the five players who most overperformed and the five players that most underperformed relative to their expected score.
+
+To calculate each player's expected score the following ELO formula:
+```{r out.width="100%", include = FALSE}
+img <- "https://unity-technologies.github.io/ml-agents/images/elo_expected_score_formula.png"
+
+```
+
+```{r out.width="100%"}
+knitr::include_graphics(img)
+
+```
+
+For each player the tournament info CSV file will include the following information:
+
+The Player’s Name, Player’s State, Total Number of Points, Player’s Pre-Rating, and Average Pre Chess Rating of Opponents.
+
+We will use the following libraries: 
+
+-  The **tidyverse** library 
+
+If you do not want to go through the data cleaning steps taken in Project 1, **feel free to skip ahead to [START OF ASSIGNMENT 5B] on the menu, as this is where the work for Assignment 5B begins**:
+
+We will be redoing the data cleaning steps from Project 1, staring with reading in our data from Github and using the readLines() function:
+
+
+```{r readLines}
+#reading in the csv from Project1's repository
+url <-("https://raw.githubusercontent.com/WendyR20/DATA-607-Project-1/refs/heads/main/tournamentinfo.txt")
+lines <- readLines(url)
+head(lines,12)
+```
+
+```{r glimpse}
+#taking a glimpse at our data
+glimpse(lines)
+```
+
+First we cleaned the data:
+
+```{r dashes}
+#replacing every dash with emptiness
+lines <- gsub("-", "", lines)
+
+#deleting every empty line
+lines <- lines[nzchar(lines)]
+
+```
+
+
+```{r header}
+#deleting the header
+lines <- lines[-c(1,2)]
+```
+
+
+```{r blocks}
+#let's group every two lines 
+blocks <- split(lines, ceiling(seq_along(lines)/2))
+
+head(blocks)
+```
+
+
+Then created a function to extract the player information we needed:
+```{r extract function}
+#creating a function can extract player information from the split blocks
+
+player_info <- function(block) {
+  
+  player_line1 <- block[1]
+  player_line2 <- block[2]
+  
+  
+  #extracting each round result and the opponent number
+  rounds <- str_extract_all(player_line1, "[WLDB]\\s*\\d+")[[1]] 
+  
+  #first time using a tibble 
+  tibble::tibble(
+    
+    Player_Number = str_extract(player_line1, "^\\s*\\d+"), #extracting the number at the new line
+    State = str_extract(player_line2,"^\\s*\\w+" ), # extracting the first word at the new line
+    Name = str_trim(str_extract(player_line1, "(?<=\\| ).*?(?=\\|)")),
+    Total_Points = str_extract(player_line1, "\\d+\\.\\d"  ), 
+    Pre_Rating = str_match(player_line2, "R:\\s+(\\d+)")[,2],
+    
+    #giving each round result it's own column
+    !!!setNames(as.list(rounds), paste0("Round", seq_along(rounds))),
+  )
+  
+}
+```
+
+
+```{r bind}
+# bind all players
+player_data <- bind_rows(lapply(blocks,player_info))
+
+head(player_data)
+```
+
+
+```{r to data frame}
+#convert the tibble to a data frame
+Chess_Players <- as.data.frame(player_data)
+
+```
+
+
+
+```{r numbers only in Rounds }
+#extracting the numbers from the rounds columns.
+
+Chess_Players <- Chess_Players %>%
+  mutate(across(c(Round1, Round2, Round3, Round4, Round5, Round6,Round7),
+                ~ as.numeric(str_remove_all(., "[^0-9]"))))
+
+```
+
+
+```{r head and glimpse }
+#Let's take a look at our data so far
+head(Chess_Players)
+glimpse(Chess_Players)
+
+```
+
+
+```{r to integer}
+#changing the pre-rating column to an integer since it will do calculations with this column later on.
+
+Chess_Players$Pre_Rating <- as.integer(Chess_Players$Pre_Rating)
+
+```
+
+
+
+```{r null }
+#replacing any null values in the Round Columns with zero.
+
+Chess_Players <- Chess_Players %>%
+  mutate(across(c(Round1, Round2, Round3, Round4, Round5, Round6,Round7),
+                ~replace_na(., 0)))
+
+glimpse(Chess_Players)
+
+```
+
+
+```{r pivot}
+#pivoting the data frame so each round has it's own row instead of it's own column for each player.
+
+Chess_Players_Pivot <- Chess_Players %>%
+  pivot_longer(cols = starts_with("Round"),
+               names_to = "Round_Column",
+               values_to = "Opp_Number") %>%
+  filter(!is.na(Opp_Number))
+
+glimpse(Chess_Players_Pivot)
+
+```
+
+
+```{r double and join}
+#joining the original Chess_Players data frame to the Chess_Players_Pivot2 data frame
+#both player_number columns must be a double type in both data frames.
+
+Chess_Players$Player_Number <- as.double(Chess_Players$Player_Number)
+
+Chess_Players_Pivot2 <- Chess_Players_Pivot %>%
+  left_join(
+    Chess_Players %>% 
+      select(Player_Number, Pre_Rating),
+    by = c("Opp_Number" = "Player_Number")
+  ) 
+```
+
+
+```{r rename pre-ratings}
+
+#renaming the pre-ratings columns so we can tell them apart for the sake of our calculations
+names(Chess_Players_Pivot2)
+
+ 
+Chess_Players_Pivot2 <- Chess_Players_Pivot2 %>%
+  rename(Player_PreRating = Pre_Rating.x,
+         Opp_PreRating = Pre_Rating.y)
+```
+
+# START OF ASSIGNMENT 5B
+
+To find the five most underperforming players in the tournament (based on the difference between their actual and expected scores), we need to find the tournament expected scores for each player in the tournament and compare them with their actual tournament scores.
+
+## Calculating Expected Scores
+
+Let's Calculate the expected score after each round for each player.
+
+```{r player exp scores}
+#first let's create a function to calculate the expected score
+expected_score <- function(player_a, player_b) {
+  1 / (1 + 10 ^ ((player_b - player_a) / 400))
+}
+
+#now we can use our function and add a column to our data frame
+Chess_Players_Pivot2 <- Chess_Players_Pivot2 %>%
+  mutate( Player_Expected_Score = expected_score(Player_PreRating, Opp_PreRating))
+
+```
+
+## Calculating the Tournament Expected Score for Each Player
+
+Let's find the overall expected score for the tournament for each player.
+
+```{r tournament exp score}
+PlayersTournamnet_ExpScores <- Chess_Players_Pivot2 %>%
+  group_by(Player_Number) %>%
+  summarise(
+    Tournament_ExpScore = sum(Player_Expected_Score, na.rm = TRUE)
+  )
+  
+  head(PlayersTournamnet_ExpScores)
+```
+
+## Each player's Expected score vs. Actual score
+
+Let's join with the original chess players table. We need the Player Number columns for the join so we need to check the data types of columns we'll be using for the join and make sure they are of the same type. If the columns are different data types we will need to change them.
+
+```{r glimpse player number cols}
+
+glimpse(PlayersTournamnet_ExpScores)
+
+
+```
+
+Since the Player Number columns are of different types, let's convert them and make absolutely sure the column names are the exact same by trimming any white space that might exist in the column names. 
+
+```{r as character}
+
+Chess_Players <- Chess_Players %>%
+  mutate(Player_Number = trimws(as.character(Player_Number)))
+
+PlayersTournamnet_ExpScores <- PlayersTournamnet_ExpScores %>%
+  mutate(Player_Number = trimws(as.character(Player_Number)))
+
+```
+
+Okay, now that both our Player Number columns in both data frame are of the same type, we can go ahead and join the data frames.
+
+```{r join tournament exp scores}
+Chess_Players <- Chess_Players %>%
+  left_join(PlayersTournamnet_ExpScores, by = "Player_Number")
+
+```
+
+Let's subset and keep only the Total Points, Player Names and Expected Score columns in a new data frame.
+
+```{r }
+
+Chess_Player_Scores <- Chess_Players %>%
+  select(-Player_Number,-State,-Pre_Rating,-Round1, -Round2, -Round3, -Round4, -Round5, -Round6,-Round7)
+```
+
+Let's round each player's expected scores.
+
+```{r round exp scores}
+
+Chess_Player_Scores$Tournament_ExpScore <- round(Chess_Player_Scores$Tournament_ExpScore, 
+                                                 digits = 1)
+
+```
+
+We will need to use the values in the Total Points column in our calculations of each player's actual score minus their expected score, so let us change the data type to numeric.
+
+```{r total points to numeric}
+Chess_Player_Scores <- Chess_Player_Scores %>%
+  mutate(
+    Total_Points = as.numeric(Total_Points)
+  )
+
+
+```
+
+To find the five players that most overperformed and underperformed we we will need to find the difference between each player's actual score and their expected score.
+
+```{r diff}
+Chess_Player_Scores <- Chess_Player_Scores %>%
+  mutate(ActScore_ExpMinus = Total_Points -Tournament_ExpScore )
+
+```
+
+Now, we can finally find and print the five players who most overperformed and underperformed based on the difference between their actual score and their expected score.
+
+## The Five Players Who Most Overerperformed
+
+Let's put the data frame in descending order so we can find the five most overperforming players:
+
+```{r descending}
+Overperforming_Players <- Chess_Player_Scores %>%
+  arrange(desc(ActScore_ExpMinus))
+```
+
+Okay, great now let's print only the five most overperforming players.
+
+```{r five over}
+head(Overperforming_Players,5)
+```
+
+## The Five Players Who Most Underperformed
+
+Now, let's put the data frame in ascending order so we can find the five most underperforming players :
+
+```{r ascending}
+Underperforming_Players <- Chess_Player_Scores %>%
+  arrange(ActScore_ExpMinus)
+```
+
+Okay, great now let's print only the five most underperforming players.
+
+```{r five under}
+head(Underperforming_Players,5)
+```
+
